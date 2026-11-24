@@ -1,7 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
 
-import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
+import 'package:material_ui/material_ui.dart';
 
 import '../services/proxy_bridge.dart';
 import '../services/ps4_rpi_client.dart';
@@ -19,18 +20,23 @@ class _HomeScreenState extends State<HomeScreen> {
 
   final _ps4IpController = TextEditingController(text: '192.168.1.100');
   final _pkgUrlController = TextEditingController();
+  final _usernameController = TextEditingController();
+  final _passwordController = TextEditingController();
   final _cookieController = TextEditingController();
   final _refererController = TextEditingController();
   final _userAgentController = TextEditingController();
 
   ProxyStatus _proxyStatus = ProxyStatus.initial();
   StreamSubscription<ProxyStatus>? _statsSub;
+  StreamSubscription<String>? _logsSub;
   Timer? _progressTimer;
 
   bool _isScanning = false;
   bool _isInstalling = false;
+  bool _isProbing = false;
   bool _showAdvancedHeaders = false;
   List<String> _discoveredPs4s = [];
+  LinkProbeResult? _probeResult;
 
   int? _activeTaskId;
   String? _activeStreamId;
@@ -55,6 +61,11 @@ class _HomeScreenState extends State<HomeScreen> {
       onError: (err) => _addLog('خطأ في قناة الإحصائيات: $err'),
     );
 
+    _logsSub = _proxyBridge.logsStream.listen(
+      (msg) => _addLog('[Proxy] $msg'),
+      onError: (_) {},
+    );
+
     try {
       final status = await _proxyBridge.getStatus();
       if (mounted) {
@@ -68,9 +79,12 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _statsSub?.cancel();
+    _logsSub?.cancel();
     _progressTimer?.cancel();
     _ps4IpController.dispose();
     _pkgUrlController.dispose();
+    _usernameController.dispose();
+    _passwordController.dispose();
     _cookieController.dispose();
     _refererController.dispose();
     _userAgentController.dispose();
@@ -84,8 +98,28 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!mounted) return;
     setState(() {
       _logs.insert(0, '[$ts] $message');
-      if (_logs.length > 50) _logs.removeLast();
+      if (_logs.length > 60) _logs.removeLast();
     });
+  }
+
+  Map<String, String> _buildCustomHeaders() {
+    final headers = <String, String>{};
+    final user = _usernameController.text.trim();
+    final pass = _passwordController.text;
+    if (user.isNotEmpty || pass.isNotEmpty) {
+      final token = base64Encode(utf8.encode('$user:$pass'));
+      headers['Authorization'] = 'Basic $token';
+    }
+    if (_cookieController.text.trim().isNotEmpty) {
+      headers['Cookie'] = _cookieController.text.trim();
+    }
+    if (_refererController.text.trim().isNotEmpty) {
+      headers['Referer'] = _refererController.text.trim();
+    }
+    if (_userAgentController.text.trim().isNotEmpty) {
+      headers['User-Agent'] = _userAgentController.text.trim();
+    }
+    return headers;
   }
 
   Future<void> _toggleService() async {
@@ -135,7 +169,40 @@ class _HomeScreenState extends State<HomeScreen> {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     if (data?.text != null && data!.text!.trim().isNotEmpty) {
       _pkgUrlController.text = data.text!.trim();
+      setState(() => _probeResult = null);
       _addLog('تم لصق رابط الـ PKG.');
+    }
+  }
+
+  Future<void> _probeLink() async {
+    final pkgUrl = _pkgUrlController.text.trim();
+    if (pkgUrl.isEmpty ||
+        (!pkgUrl.startsWith('http://') && !pkgUrl.startsWith('https://'))) {
+      _showSnack('يرجى إدخال رابط تحميل صحيح (http أو https) أولاً');
+      return;
+    }
+
+    setState(() {
+      _isProbing = true;
+      _probeResult = null;
+    });
+    _addLog('جاري فحص الرابط والتحقق من ترويسة ملف الـ PKG...');
+
+    try {
+      final result = await _proxyBridge.probeUrl(
+        url: pkgUrl,
+        headers: _buildCustomHeaders(),
+      );
+      if (!mounted) return;
+      setState(() => _probeResult = result);
+      _addLog('نتيجة الفحص: ${result.message}');
+      if (result.statusCode == 401 || result.statusCode == 403) {
+        setState(() => _showAdvancedHeaders = true);
+      }
+    } catch (e) {
+      _addLog('فشل فحص الرابط: $e');
+    } finally {
+      if (mounted) setState(() => _isProbing = false);
     }
   }
 
@@ -163,28 +230,16 @@ class _HomeScreenState extends State<HomeScreen> {
         setState(() => _proxyStatus = status);
       }
 
-      // 2. Build optional custom headers
-      final headers = <String, String>{};
-      if (_cookieController.text.trim().isNotEmpty) {
-        headers['Cookie'] = _cookieController.text.trim();
-      }
-      if (_refererController.text.trim().isNotEmpty) {
-        headers['Referer'] = _refererController.text.trim();
-      }
-      if (_userAgentController.text.trim().isNotEmpty) {
-        headers['User-Agent'] = _userAgentController.text.trim();
-      }
-
-      // 3. Register upstream URL in local streaming proxy
+      // 2. Register upstream URL in local streaming proxy
       await _proxyBridge.resetStats();
       final stream = await _proxyBridge.registerUrl(
         url: pkgUrl,
-        headers: headers,
+        headers: _buildCustomHeaders(),
       );
       _activeStreamId = stream.id;
       _addLog('تم إنشاء رابط البث المحلي: ${stream.proxyUrl}');
 
-      // 4. Send local proxy URL to PS4 GoldHEN RPI
+      // 3. Send local proxy URL to PS4 GoldHEN RPI
       _addLog('إرسال طلب التثبيت إلى PS4 ($ps4Ip:12800)...');
       final res = await _rpiClient.installPkg(
         ps4Ip: ps4Ip,
@@ -488,6 +543,28 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       ),
                     ),
+                    if (_probeResult != null) ...[
+                      const SizedBox(height: 10),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: _probeResult!.ok
+                              ? Colors.green.withValues(alpha: 0.18)
+                              : Colors.orange.withValues(alpha: 0.18),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: _probeResult!.ok
+                                ? Colors.greenAccent
+                                : Colors.orangeAccent,
+                          ),
+                        ),
+                        child: Text(
+                          _probeResult!.message,
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 8),
                     InkWell(
                       onTap: () => setState(
@@ -504,12 +581,41 @@ class _HomeScreenState extends State<HomeScreen> {
                               size: 20,
                             ),
                             const SizedBox(width: 6),
-                            const Text('خيارات متقدمة (Cookie / Referer / User-Agent)'),
+                            const Text('كلمة المرور / الترويسات المتقدمة (Auth / Cookie)'),
                           ],
                         ),
                       ),
                     ),
                     if (_showAdvancedHeaders) ...[
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: _usernameController,
+                              textDirection: TextDirection.ltr,
+                              decoration: const InputDecoration(
+                                labelText: 'اسم المستخدم (اختياري)',
+                                border: OutlineInputBorder(),
+                                isDense: true,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: TextField(
+                              controller: _passwordController,
+                              textDirection: TextDirection.ltr,
+                              obscureText: true,
+                              decoration: const InputDecoration(
+                                labelText: 'كلمة المرور (اختياري)',
+                                border: OutlineInputBorder(),
+                                isDense: true,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
                       const SizedBox(height: 8),
                       TextField(
                         controller: _cookieController,
@@ -542,23 +648,45 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     ],
                     const SizedBox(height: 14),
-                    SizedBox(
-                      width: double.infinity,
-                      height: 48,
-                      child: FilledButton.icon(
-                        onPressed: _isInstalling ? null : _startInstall,
-                        icon: _isInstalling
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(strokeWidth: 2),
-                              )
-                            : const Icon(Icons.download_for_offline),
-                        label: const Text(
-                          'بدء التثبيت المباشر على PS4',
-                          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    Row(
+                      children: [
+                        OutlinedButton.icon(
+                          onPressed: _isProbing ? null : _probeLink,
+                          icon: _isProbing
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                )
+                              : const Icon(Icons.verified_outlined),
+                          label: const Text('فحص الرابط'),
                         ),
-                      ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: SizedBox(
+                            height: 48,
+                            child: FilledButton.icon(
+                              onPressed: _isInstalling ? null : _startInstall,
+                              icon: _isInstalling
+                                  ? const SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Icon(Icons.download_for_offline),
+                              label: const Text(
+                                'بدء التثبيت المباشر على PS4',
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
@@ -661,11 +789,11 @@ class _HomeScreenState extends State<HomeScreen> {
                     const SizedBox(height: 6),
                     if (_logs.isEmpty)
                       const Text(
-                        'لا توجد عمليات بعد. قم بلصق رابط PKG واضغط بدء التثبيت.',
+                        'لا توجد عمليات بعد. قم بلصق رابط PKG واضغط فحص الرابط أو بدء التثبيت.',
                         style: TextStyle(color: Colors.grey, fontSize: 13),
                       )
                     else
-                      ..._logs.take(15).map(
+                      ..._logs.take(20).map(
                             (log) => Padding(
                               padding: const EdgeInsets.symmetric(vertical: 2),
                               child: Text(

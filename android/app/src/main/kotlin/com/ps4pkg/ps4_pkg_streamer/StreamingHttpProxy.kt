@@ -36,11 +36,25 @@ data class ProxyStats(
     val bytesPerSecond: Long,
 )
 
+data class ProbeResult(
+    val ok: Boolean,
+    val statusCode: Int,
+    val contentType: String,
+    val contentLength: Long,
+    val supportsRange: Boolean,
+    val isValidPkgHeader: Boolean,
+    val finalUrl: String,
+    val message: String,
+)
+
 /**
- * Lightweight, zero-disk-usage HTTP/1.1 streaming proxy with full Range/Resume (206 Partial Content)
- * and cross-protocol redirect (HTTPS -> HTTP) support for PS4 Remote Package Installer (RPI).
+ * Lightweight, zero-disk-usage HTTP/1.1 streaming proxy with full Range/Resume (206 Partial Content),
+ * HTTP Basic Auth, and cross-protocol redirect (HTTPS -> HTTP) support for PS4 RPI.
  */
-class StreamingHttpProxy(private val port: Int = 8888) {
+class StreamingHttpProxy(
+    private val port: Int = 8888,
+    private val onLog: ((String) -> Unit)? = null,
+) {
 
     private val running = AtomicBoolean(false)
     private var serverSocket: ServerSocket? = null
@@ -54,6 +68,10 @@ class StreamingHttpProxy(private val port: Int = 8888) {
     private var lastSpeedCalcTimeMs = System.currentTimeMillis()
     @Volatile
     private var lastCalculatedSpeedBps: Long = 0
+
+    private fun log(msg: String) {
+        onLog?.invoke(msg)
+    }
 
     fun isRunning(): Boolean = running.get()
 
@@ -218,6 +236,7 @@ class StreamingHttpProxy(private val port: Int = 8888) {
     ) {
         var conn: HttpURLConnection? = null
         try {
+            log("PS4 طلب $method ${if (rangeHeader != null) "($rangeHeader)" else ""}")
             conn = openUpstreamConnection(
                 urlStr = entry.url,
                 method = method,
@@ -237,6 +256,11 @@ class StreamingHttpProxy(private val port: Int = 8888) {
                     customHeaders = entry.headers,
                 )
                 statusCode = conn.responseCode
+                if (statusCode !in listOf(200, 206)) {
+                    log("فشل التحميل من السيرفر: HTTP $statusCode (${conn.responseMessage ?: ""})")
+                    writeError(out, statusCode, conn.responseMessage ?: "Upstream Error")
+                    return
+                }
                 val totalLength = parseTotalLengthFromContentRange(conn.getHeaderField("Content-Range"))
                     ?: conn.contentLengthLong
                 val headersOut = buildString {
@@ -253,13 +277,26 @@ class StreamingHttpProxy(private val port: Int = 8888) {
             }
 
             if (statusCode !in listOf(200, 206)) {
+                val hint = when (statusCode) {
+                    401 -> "يتطلب اسم مستخدم وكلمة مرور (HTTP 401)"
+                    403 -> "ممنوع الوصول أو يتطلب Cookie/كلمة مرور (HTTP 403)"
+                    404 -> "الملف غير موجود على السيرفر (HTTP 404)"
+                    else -> "خطأ من السيرفر: HTTP $statusCode"
+                }
+                log("⚠️ $hint")
                 writeError(out, statusCode, conn.responseMessage ?: "Upstream Error")
                 return
+            }
+
+            val contentType = conn.contentType ?: ""
+            if (contentType.contains("text/html", ignoreCase = true)) {
+                log("⚠️ تحذير: الرابط يرجّع صفحة HTML وليس ملف PKG مباشر (قد يتطلب كلمة مرور في المتصفح)")
             }
 
             val contentLength = conn.contentLengthLong
             val contentRange = conn.getHeaderField("Content-Range")
             val statusText = if (statusCode == 206) "Partial Content" else "OK"
+            log("السيرفر استجاب: HTTP $statusCode (${if (contentLength > 0) "${contentLength / (1024 * 1024)} MB" else "stream"})")
 
             val responseHeader = buildString {
                 append("HTTP/1.1 $statusCode $statusText\r\n")
@@ -292,10 +329,121 @@ class StreamingHttpProxy(private val port: Int = 8888) {
                 out.flush()
             }
         } catch (e: IOException) {
+            log("خطأ في البث: ${e.message ?: "انقطع الاتصال"}")
             try {
                 writeError(out, 502, "Bad Gateway: ${e.message ?: "Upstream failure"}")
             } catch (_: Exception) {
             }
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    fun probeUrl(urlStr: String, customHeaders: Map<String, String>): ProbeResult {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = openUpstreamConnection(
+                urlStr = urlStr.trim(),
+                method = "GET",
+                rangeHeader = "bytes=0-15",
+                customHeaders = customHeaders,
+            )
+            val code = conn.responseCode
+            val contentType = conn.contentType ?: "unknown"
+            val finalUrl = conn.url?.toString() ?: urlStr
+            val contentRange = conn.getHeaderField("Content-Range")
+            val totalLength = parseTotalLengthFromContentRange(contentRange) ?: conn.contentLengthLong
+            val supportsRange = code == 206 ||
+                (conn.getHeaderField("Accept-Ranges")?.contains("bytes", ignoreCase = true) == true)
+
+            if (code == 401) {
+                return ProbeResult(
+                    ok = false,
+                    statusCode = 401,
+                    contentType = contentType,
+                    contentLength = -1,
+                    supportsRange = false,
+                    isValidPkgHeader = false,
+                    finalUrl = finalUrl,
+                    message = "🔒 الرابط محمي بكلمة مرور (HTTP 401). أدخل اسم المستخدم وكلمة المرور في الخيارات المتقدمة.",
+                )
+            }
+            if (code == 403) {
+                return ProbeResult(
+                    ok = false,
+                    statusCode = 403,
+                    contentType = contentType,
+                    contentLength = -1,
+                    supportsRange = false,
+                    isValidPkgHeader = false,
+                    finalUrl = finalUrl,
+                    message = "🔒 السيرفر رفض الوصول (HTTP 403). قد يتطلب الرابط Cookie أو Referer أو تسجيل دخول.",
+                )
+            }
+            if (code !in listOf(200, 206)) {
+                return ProbeResult(
+                    ok = false,
+                    statusCode = code,
+                    contentType = contentType,
+                    contentLength = totalLength,
+                    supportsRange = supportsRange,
+                    isValidPkgHeader = false,
+                    finalUrl = finalUrl,
+                    message = "❌ السيرفر أعاد خطأ HTTP $code (${conn.responseMessage ?: ""}).",
+                )
+            }
+
+            val magic = ByteArray(16)
+            val bytesRead = try {
+                conn.inputStream.use { it.read(magic) }
+            } catch (_: Exception) {
+                0
+            }
+
+            val isPkg = bytesRead >= 4 &&
+                magic[0] == 0x7F.toByte() &&
+                magic[1] == 0x43.toByte() && // 'C'
+                magic[2] == 0x4E.toByte() && // 'N'
+                magic[3] == 0x54.toByte()    // 'T'
+
+            val isHtml = contentType.contains("text/html", ignoreCase = true) ||
+                (bytesRead >= 5 && String(magic, 0, bytesRead).trimStart().startsWith("<"))
+
+            val isZip = bytesRead >= 2 && magic[0] == 0x50.toByte() && magic[1] == 0x4B.toByte()
+            val isRar = bytesRead >= 4 && String(magic, 0, 4) == "Rar!"
+
+            val msg = when {
+                isPkg -> {
+                    val sizeMb = if (totalLength > 0) String.format("%.1f MB", totalLength / (1024.0 * 1024.0)) else "غير معروف"
+                    val resumeTxt = if (supportsRange) "يدعم الاستئناف ✅" else "لا يدعم الاستئناف ⚠️"
+                    "✅ ملف PS4 PKG صالح! الحجم: $sizeMb • $resumeTxt"
+                }
+                isHtml -> "⚠️ الرابط يفتح صفحة ويب (HTML) وليس ملف PKG مباشر! إذا كانت الصفحة تطلب باسوورد، افتحها في المتصفح وأدخل الباسوورد ثم انسخ رابط التحميل المباشر."
+                isZip || isRar -> "📦 الملف مضغوط (ZIP/RAR) وليس ملف .pkg مباشر — جهاز PS4 يقبل ملفات .pkg فقط بعد فك الضغط."
+                else -> "⚠️ الملف لا يبدأ بترويسة PS4 PKG القياسية (0x7F CNT). نوع المحتوى: $contentType"
+            }
+
+            ProbeResult(
+                ok = isPkg,
+                statusCode = code,
+                contentType = contentType,
+                contentLength = totalLength,
+                supportsRange = supportsRange,
+                isValidPkgHeader = isPkg,
+                finalUrl = finalUrl,
+                message = msg,
+            )
+        } catch (e: Exception) {
+            ProbeResult(
+                ok = false,
+                statusCode = 0,
+                contentType = "",
+                contentLength = -1,
+                supportsRange = false,
+                isValidPkgHeader = false,
+                finalUrl = urlStr,
+                message = "❌ تعذر الاتصال بالرابط: ${e.message ?: "خطأ غير معروف"}",
+            )
         } finally {
             conn?.disconnect()
         }
@@ -313,6 +461,7 @@ class StreamingHttpProxy(private val port: Int = 8888) {
 
         while (true) {
             val url = URL(currentUrl)
+            val userInfo = url.userInfo
             val conn = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = method
                 instanceFollowRedirects = false
@@ -324,6 +473,13 @@ class StreamingHttpProxy(private val port: Int = 8888) {
                         ?: "Mozilla/5.0 (Linux; Android 14) PS4PkgStreamer/1.0",
                 )
                 setRequestProperty("Accept", "*/*")
+                if (!userInfo.isNullOrBlank() && customHeaders.keys.none { it.equals("Authorization", ignoreCase = true) }) {
+                    val encoded = android.util.Base64.encodeToString(
+                        userInfo.toByteArray(Charsets.UTF_8),
+                        android.util.Base64.NO_WRAP,
+                    )
+                    setRequestProperty("Authorization", "Basic $encoded")
+                }
                 if (!rangeHeader.isNullOrBlank()) {
                     setRequestProperty("Range", rangeHeader)
                 }

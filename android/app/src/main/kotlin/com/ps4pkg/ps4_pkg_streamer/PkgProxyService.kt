@@ -68,7 +68,9 @@ class PkgProxyService : Service() {
         acquireLocks()
 
         if (proxy == null || proxy?.isRunning() != true) {
-            val newProxy = StreamingHttpProxy(port)
+            val newProxy = StreamingHttpProxy(port) { msg ->
+                onProxyLog?.invoke(msg)
+            }
             if (newProxy.start()) {
                 proxy = newProxy
             }
@@ -249,5 +251,8 @@ class PkgProxyService : Service() {
 
         @Volatile
         var onStatsUpdated: ((ProxyStats) -> Unit)? = null
+
+        @Volatile
+        var onProxyLog: ((String) -> Unit)? = null
     }
 }

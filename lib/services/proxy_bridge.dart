@@ -65,15 +65,56 @@ class RegisteredStream {
   }
 }
 
+class LinkProbeResult {
+  final bool ok;
+  final int statusCode;
+  final String contentType;
+  final int contentLength;
+  final bool supportsRange;
+  final bool isValidPkgHeader;
+  final String finalUrl;
+  final String message;
+
+  const LinkProbeResult({
+    required this.ok,
+    required this.statusCode,
+    required this.contentType,
+    required this.contentLength,
+    required this.supportsRange,
+    required this.isValidPkgHeader,
+    required this.finalUrl,
+    required this.message,
+  });
+
+  factory LinkProbeResult.fromMap(Map<dynamic, dynamic> map) {
+    return LinkProbeResult(
+      ok: map['ok'] == true,
+      statusCode: (map['statusCode'] as num?)?.toInt() ?? 0,
+      contentType: (map['contentType'] as String?) ?? '',
+      contentLength: (map['contentLength'] as num?)?.toInt() ?? -1,
+      supportsRange: map['supportsRange'] == true,
+      isValidPkgHeader: map['isValidPkgHeader'] == true,
+      finalUrl: (map['finalUrl'] as String?) ?? '',
+      message: (map['message'] as String?) ?? '',
+    );
+  }
+}
+
 class ProxyBridge {
   static const _methodChannel =
       MethodChannel('com.ps4pkg.ps4_pkg_streamer/proxy');
   static const _eventChannel =
       EventChannel('com.ps4pkg.ps4_pkg_streamer/stats');
+  static const _logChannel =
+      EventChannel('com.ps4pkg.ps4_pkg_streamer/logs');
 
   Stream<ProxyStatus> get statsStream => _eventChannel
       .receiveBroadcastStream()
       .map((event) => ProxyStatus.fromMap(event as Map<dynamic, dynamic>));
+
+  Stream<String> get logsStream => _logChannel
+      .receiveBroadcastStream()
+      .map((event) => event.toString());
 
   Future<ProxyStatus> startService({int port = 8888}) async {
     final res = await _methodChannel.invokeMethod<Map<dynamic, dynamic>>(
@@ -92,6 +133,23 @@ class ProxyBridge {
       'getStatus',
     );
     return res != null ? ProxyStatus.fromMap(res) : ProxyStatus.initial();
+  }
+
+  Future<LinkProbeResult> probeUrl({
+    required String url,
+    Map<String, String> headers = const {},
+  }) async {
+    final res = await _methodChannel.invokeMethod<Map<dynamic, dynamic>>(
+      'probeUrl',
+      {
+        'url': url,
+        'headers': headers,
+      },
+    );
+    if (res == null) {
+      throw Exception('فشل فحص الرابط');
+    }
+    return LinkProbeResult.fromMap(res);
   }
 
   Future<RegisteredStream> registerUrl({

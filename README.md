@@ -10,7 +10,7 @@
 - **متابعة التقدم والتحكم بالمهام**: شريط تقدم حي وأزرار إيقاف مؤقت، استئناف، وإلغاء عبر واجهة Remote Package Installer (RPI).
 
 ## التحميل المباشر (APK للأندرويد)
-- [تحميل PS4 PKG Streamer v1.0.0 (Release APK)](https://github.com/AhhmedLM/ps4-pkg-streamer/raw/main/apk/ps4-pkg-streamer-v1.0.0-release.apk)
+- [تحميل PS4 PKG Streamer v1.1.0 (Release APK)](https://github.com/AhhmedLM/ps4-pkg-streamer/raw/main/apk/ps4-pkg-streamer-v1.1.0-release.apk)
 
 ## طريقة الاستخدام
 1. حمّل ملف الـ APK من الرابط أعلاه وثبّته على هاتف الأندرويد.

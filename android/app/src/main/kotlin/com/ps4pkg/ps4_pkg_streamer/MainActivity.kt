@@ -93,6 +93,37 @@ class MainActivity : FlutterActivity() {
                     result.success(buildStatusMap())
                 }
 
+                "probeUrl" -> {
+                    val url = call.argument<String>("url")
+                    if (url.isNullOrBlank()) {
+                        result.error("INVALID_URL", "URL is required", null)
+                        return@setMethodCallHandler
+                    }
+                    @Suppress("UNCHECKED_CAST")
+                    val headers = (call.argument<Map<String, Any?>>("headers") ?: emptyMap())
+                        .mapNotNull { (k, v) -> v?.toString()?.let { k to it } }
+                        .toMap()
+
+                    Thread {
+                        val proxy = PkgProxyService.proxy ?: StreamingHttpProxy(PkgProxyService.DEFAULT_PORT)
+                        val probe = proxy.probeUrl(url, headers)
+                        mainHandler.post {
+                            result.success(
+                                mapOf(
+                                    "ok" to probe.ok,
+                                    "statusCode" to probe.statusCode,
+                                    "contentType" to probe.contentType,
+                                    "contentLength" to probe.contentLength,
+                                    "supportsRange" to probe.supportsRange,
+                                    "isValidPkgHeader" to probe.isValidPkgHeader,
+                                    "finalUrl" to probe.finalUrl,
+                                    "message" to probe.message,
+                                )
+                            )
+                        }
+                    }.start()
+                }
+
                 else -> result.notImplemented()
             }
         }
@@ -114,6 +145,23 @@ class MainActivity : FlutterActivity() {
             override fun onCancel(arguments: Any?) {
                 eventSink = null
                 PkgProxyService.onStatsUpdated = null
+            }
+        })
+
+        EventChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            LOG_CHANNEL
+        ).setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                PkgProxyService.onProxyLog = { msg ->
+                    mainHandler.post {
+                        events?.success(msg)
+                    }
+                }
+            }
+
+            override fun onCancel(arguments: Any?) {
+                PkgProxyService.onProxyLog = null
             }
         })
     }
@@ -172,5 +220,6 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val METHOD_CHANNEL = "com.ps4pkg.ps4_pkg_streamer/proxy"
         private const val EVENT_CHANNEL = "com.ps4pkg.ps4_pkg_streamer/stats"
+        private const val LOG_CHANNEL = "com.ps4pkg.ps4_pkg_streamer/logs"
     }
 }
