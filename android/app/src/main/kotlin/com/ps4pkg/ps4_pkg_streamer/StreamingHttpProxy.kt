@@ -62,6 +62,7 @@ class StreamingHttpProxy(
     private var workerPool: ExecutorService? = null
 
     private val entries = ConcurrentHashMap<String, StreamEntry>()
+    private val jsonManifests = ConcurrentHashMap<String, String>()
     private val activeConnections = AtomicInteger(0)
     private val totalBytesTransferred = AtomicLong(0)
     private val intervalBytes = AtomicLong(0)
@@ -131,8 +132,14 @@ class StreamingHttpProxy(
         return entry
     }
 
+    fun registerJsonManifest(id: String, jsonBody: String): String {
+        jsonManifests[id] = jsonBody
+        return "http://${getLocalIpAddress()}:${getPort()}/json/$id.json"
+    }
+
     fun unregisterStream(id: String) {
         entries.remove(id)
+        jsonManifests.remove(id)
     }
 
     fun resetStats() {
@@ -194,6 +201,29 @@ class StreamingHttpProxy(
                 out.write(header.toByteArray())
                 out.write(body)
                 out.flush()
+                return
+            }
+
+            // Serve GoldHEN BGFT manifest JSON: /json/<id>.json
+            val jsonMatch = Regex("^/json/([a-zA-Z0-9_-]+)\\.json$").matchEntire(rawPath)
+            if (jsonMatch != null) {
+                val jsonId = jsonMatch.groupValues[1]
+                val jsonStr = jsonManifests[jsonId]
+                if (jsonStr == null) {
+                    writeError(out, 404, "Manifest Not Found")
+                    return
+                }
+                val body = jsonStr.toByteArray(Charsets.UTF_8)
+                val header = "HTTP/1.1 200 OK\r\n" +
+                    "Content-Type: application/json\r\n" +
+                    "Content-Length: ${body.size}\r\n" +
+                    "Connection: close\r\n\r\n"
+                out.write(header.toByteArray())
+                if (method != "HEAD") {
+                    out.write(body)
+                }
+                out.flush()
+                log("PS4 استلم ملف التعريف JSON بنجاح")
                 return
             }
 
@@ -449,7 +479,7 @@ class StreamingHttpProxy(
         }
     }
 
-    private fun openUpstreamConnection(
+    internal fun openUpstreamConnection(
         urlStr: String,
         method: String,
         rangeHeader: String?,
@@ -506,7 +536,7 @@ class StreamingHttpProxy(
         }
     }
 
-    private fun parseTotalLengthFromContentRange(contentRange: String?): Long? {
+    internal fun parseTotalLengthFromContentRange(contentRange: String?): Long? {
         if (contentRange.isNullOrBlank()) return null
         val slashIdx = contentRange.lastIndexOf('/')
         if (slashIdx == -1 || slashIdx == contentRange.length - 1) return null

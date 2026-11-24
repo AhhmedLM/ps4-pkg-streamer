@@ -31,6 +31,7 @@ class _HomeScreenState extends State<HomeScreen> {
   StreamSubscription<String>? _logsSub;
   Timer? _progressTimer;
 
+  bool _useGoldHenBinLoader = true;
   bool _isScanning = false;
   bool _isInstalling = false;
   bool _isProbing = false;
@@ -41,6 +42,7 @@ class _HomeScreenState extends State<HomeScreen> {
   int? _activeTaskId;
   String? _activeStreamId;
   String? _activeTitle;
+  int _goldHenTotalSize = 0;
   RpiTaskProgress? _taskProgress;
 
   final List<String> _logs = [];
@@ -147,13 +149,19 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     final localIp = _proxyStatus.localIp;
-    _addLog('جاري البحث عن جهاز PS4 (المنفذ 12800) على شبكة $localIp...');
+    final targetPort = _useGoldHenBinLoader ? 9090 : 12800;
+    final modeName = _useGoldHenBinLoader ? 'GoldHEN BinLoader (9090)' : 'RPI (12800)';
+    _addLog('جاري البحث عن PS4 ($modeName) على شبكة $localIp...');
     try {
-      final found = await _rpiClient.scanForPs4(localIp);
+      final found = await _rpiClient.scanForPs4(localIp, port: targetPort);
       if (!mounted) return;
       setState(() => _discoveredPs4s = found);
       if (found.isEmpty) {
-        _addLog('لم يتم العثور على PS4. تأكد من فتح Remote Package Installer.');
+        _addLog(
+          _useGoldHenBinLoader
+              ? 'لم يتم العثور على PS4 على المنفذ 9090. تأكد من تفعيل BinLoader Server في إعدادات GoldHEN.'
+              : 'لم يتم العثور على PS4 على المنفذ 12800. تأكد من فتح Remote Package Installer.',
+        );
       } else {
         _ps4IpController.text = found.first;
         _addLog('تم العثور على PS4: ${found.join(", ")}');
@@ -230,32 +238,60 @@ class _HomeScreenState extends State<HomeScreen> {
         setState(() => _proxyStatus = status);
       }
 
-      // 2. Register upstream URL in local streaming proxy
       await _proxyBridge.resetStats();
-      final stream = await _proxyBridge.registerUrl(
-        url: pkgUrl,
-        headers: _buildCustomHeaders(),
-      );
-      _activeStreamId = stream.id;
-      _addLog('تم إنشاء رابط البث المحلي: ${stream.proxyUrl}');
 
-      // 3. Send local proxy URL to PS4 GoldHEN RPI
-      _addLog('إرسال طلب التثبيت إلى PS4 ($ps4Ip:12800)...');
-      final res = await _rpiClient.installPkg(
-        ps4Ip: ps4Ip,
-        packageUrl: stream.proxyUrl,
-      );
-
-      if (res.success && res.taskId != null) {
-        setState(() {
-          _activeTaskId = res.taskId;
-          _activeTitle = res.title ?? stream.fileName;
-        });
-        _addLog('بدأ التثبيت بنجاح! رقم المهمة: ${res.taskId} ($_activeTitle)');
-        _startProgressPolling(ps4Ip, res.taskId!);
+      if (_useGoldHenBinLoader) {
+        // Direct GoldHEN BinLoader (Port 9090) — works on PS4 5.05 - 14.02+
+        _addLog('بدء التثبيت المباشر عبر GoldHEN BinLoader ($ps4Ip:9090)...');
+        final res = await _proxyBridge.installViaGoldHen(
+          ps4Ip: ps4Ip,
+          url: pkgUrl,
+          headers: _buildCustomHeaders(),
+        );
+        if (!mounted) return;
+        if (res.success) {
+          _progressTimer?.cancel();
+          setState(() {
+            _activeTaskId = null;
+            _activeStreamId = res.streamId;
+            _activeTitle = res.title.isNotEmpty ? res.title : res.contentId;
+            _goldHenTotalSize = res.packageSize;
+          });
+          _showSnack('تم إرسال اللعبة إلى GoldHEN بنجاح! راقب إشعارات الـ PS4.');
+        } else {
+          _showSnack('فشل GoldHEN: ${res.error}');
+        }
       } else {
-        _addLog('رفض الـ PS4 الطلب: ${res.error}');
-        _showSnack('فشل بدء التثبيت: ${res.error}');
+        // Legacy RPI (Port 12800)
+        final stream = await _proxyBridge.registerUrl(
+          url: pkgUrl,
+          headers: _buildCustomHeaders(),
+        );
+        _activeStreamId = stream.id;
+        _addLog('تم إنشاء رابط البث المحلي: ${stream.proxyUrl}');
+
+        _addLog('إرسال طلب التثبيت إلى PS4 RPI ($ps4Ip:12800)...');
+        final res = await _rpiClient.installPkg(
+          ps4Ip: ps4Ip,
+          packageUrl: stream.proxyUrl,
+        );
+
+        if (res.success && res.taskId != null) {
+          setState(() {
+            _activeTaskId = res.taskId;
+            _activeTitle = res.title ?? stream.fileName;
+            _goldHenTotalSize = 0;
+          });
+          _addLog('بدأ التثبيت بنجاح! رقم المهمة: ${res.taskId} ($_activeTitle)');
+          if (res.taskId! >= 0) {
+            _startProgressPolling(ps4Ip, res.taskId!);
+          } else {
+            _addLog('⚠️ ملاحظة: RPI أعاد task_id = -1. يُنصح باستخدام وضع GoldHEN (9090) على إصدارات PS4 الحديثة.');
+          }
+        } else {
+          _addLog('رفض الـ PS4 الطلب: ${res.error}');
+          _showSnack('فشل بدء التثبيت: ${res.error}');
+        }
       }
     } catch (e) {
       _addLog('خطأ أثناء الاتصال بالـ PS4: $e');
@@ -456,10 +492,39 @@ class _HomeScreenState extends State<HomeScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'اتصال جهاز PS4 (GoldHEN RPI :12800)',
+                      'اتصال جهاز PS4',
                       style: theme.textTheme.titleMedium?.copyWith(
                         fontWeight: FontWeight.bold,
                       ),
+                    ),
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      width: double.infinity,
+                      child: SegmentedButton<bool>(
+                        segments: const [
+                          ButtonSegment<bool>(
+                            value: true,
+                            label: Text('GoldHEN (9090)'),
+                            icon: Icon(Icons.bolt, size: 16),
+                          ),
+                          ButtonSegment<bool>(
+                            value: false,
+                            label: Text('RPI (12800)'),
+                            icon: Icon(Icons.apps, size: 16),
+                          ),
+                        ],
+                        selected: {_useGoldHenBinLoader},
+                        onSelectionChanged: (sel) {
+                          setState(() => _useGoldHenBinLoader = sel.first);
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      _useGoldHenBinLoader
+                          ? 'موصى به لإصدارات PS4 9.00–14.02+: فعّل BinLoader Server من إعدادات GoldHEN (لا تحتاج لفتح RPI).'
+                          : 'الوضع القديم: يتطلب فتح تطبيق Remote Package Installer على الـ PS4.',
+                      style: const TextStyle(fontSize: 12, color: Colors.grey),
                     ),
                     const SizedBox(height: 12),
                     Row(
@@ -693,7 +758,56 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
 
-            // 4. Active Task Progress Card
+            // 4A. GoldHEN Live Proxy Transfer Card
+            if (_goldHenTotalSize > 0) ...[
+              const SizedBox(height: 12),
+              Card(
+                color: theme.colorScheme.surfaceContainerHighest,
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'بث GoldHEN النشط — ${_activeTitle ?? ""}',
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      LinearProgressIndicator(
+                        value: (_proxyStatus.totalBytesTransferred /
+                                _goldHenTotalSize)
+                            .clamp(0.0, 1.0),
+                        minHeight: 8,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            '${((_proxyStatus.totalBytesTransferred / _goldHenTotalSize).clamp(0.0, 1.0) * 100).toStringAsFixed(1)}% • ${_formatSpeed(_proxyStatus.bytesPerSecond)}',
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          Text(
+                            '${_formatBytes(_proxyStatus.totalBytesTransferred)} / ${_formatBytes(_goldHenTotalSize)}',
+                            textDirection: TextDirection.ltr,
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      const Text(
+                        'يمكنك الإيقاف المؤقت والاستئناف مباشرة من الإشعارات ← التنزيلات في جهاز PS4.',
+                        style: TextStyle(fontSize: 12, color: Colors.grey),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+
+            // 4B. Active RPI Task Progress Card
             if (_activeTaskId != null) ...[
               const SizedBox(height: 12),
               Card(

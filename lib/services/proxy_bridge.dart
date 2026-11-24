@@ -178,4 +178,60 @@ class ProxyBridge {
   Future<void> resetStats() async {
     await _methodChannel.invokeMethod('resetStats');
   }
+
+  Future<GoldHenInstallResult> installViaGoldHen({
+    required String ps4Ip,
+    required String url,
+    Map<String, String> headers = const {},
+  }) async {
+    final res = await _methodChannel.invokeMethod<Map<dynamic, dynamic>>(
+      'installViaGoldHen',
+      {
+        'ps4Ip': ps4Ip,
+        'url': url,
+        'headers': headers,
+      },
+    );
+    if (res == null) {
+      return const GoldHenInstallResult(
+        success: false,
+        title: '',
+        contentId: '',
+        packageSize: 0,
+        streamId: '',
+        error: 'فشل الاتصال بخدمة GoldHEN المحلية',
+      );
+    }
+    return GoldHenInstallResult.fromMap(res);
+  }
+}
+
+class GoldHenInstallResult {
+  final bool success;
+  final String title;
+  final String contentId;
+  final int packageSize;
+  final String streamId;
+  final String? error;
+
+  const GoldHenInstallResult({
+    required this.success,
+    required this.title,
+    required this.contentId,
+    required this.packageSize,
+    required this.streamId,
+    this.error,
+  });
+
+  factory GoldHenInstallResult.fromMap(Map<dynamic, dynamic> map) {
+    final err = map['error']?.toString();
+    return GoldHenInstallResult(
+      success: map['success'] == true,
+      title: (map['title'] as String?) ?? '',
+      contentId: (map['contentId'] as String?) ?? '',
+      packageSize: (map['packageSize'] as num?)?.toInt() ?? 0,
+      streamId: (map['streamId'] as String?) ?? '',
+      error: (err == null || err.isEmpty) ? null : err,
+    );
+  }
 }

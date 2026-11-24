@@ -10,10 +10,10 @@
 - **متابعة التقدم والتحكم بالمهام**: شريط تقدم حي وأزرار إيقاف مؤقت، استئناف، وإلغاء عبر واجهة Remote Package Installer (RPI).
 
 ## التحميل المباشر (APK للأندرويد)
-- [تحميل PS4 PKG Streamer v1.1.0 (Release APK)](https://github.com/AhhmedLM/ps4-pkg-streamer/raw/main/apk/ps4-pkg-streamer-v1.1.0-release.apk)
+- [تحميل PS4 PKG Streamer v1.2.0 (Release APK — يدعم GoldHEN 9090 مباشرة)](https://github.com/AhhmedLM/ps4-pkg-streamer/raw/main/apk/ps4-pkg-streamer-v1.2.0-release.apk)
 
-## طريقة الاستخدام
+## طريقة الاستخدام (GoldHEN 5.05 – 14.02+)
 1. حمّل ملف الـ APK من الرابط أعلاه وثبّته على هاتف الأندرويد.
 2. تأكد أن الهاتف وجهاز PS4 متصلان بنفس شبكة الواي فاي.
-3. شغّل **Remote Package Installer (RPI)** على جهاز PS4 (GoldHEN).
-4. افتح التطبيق، اضغط **بحث تلقائي** لاكتشاف IP الـ PS4، الصق رابط الـ `.pkg` المباشر، ثم اضغط **بدء التثبيت المباشر على PS4**.
+3. على جهاز PS4: افتح **GoldHEN → Server Settings** وفعّل **Enable BinLoader Server** (المنفذ `9090`). *(لا تحتاج لفتح تطبيق RPI).*
+4. افتح التطبيق، اختر وضع **GoldHEN (9090)**، اضغط **بحث تلقائي**، الصق رابط الـ `.pkg` المباشر، ثم اضغط **بدء التثبيت المباشر على PS4**.

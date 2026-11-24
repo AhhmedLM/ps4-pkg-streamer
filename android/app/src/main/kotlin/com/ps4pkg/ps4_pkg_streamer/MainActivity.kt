@@ -124,6 +124,50 @@ class MainActivity : FlutterActivity() {
                     }.start()
                 }
 
+                "installViaGoldHen" -> {
+                    val ps4Ip = call.argument<String>("ps4Ip")
+                    val url = call.argument<String>("url")
+                    if (ps4Ip.isNullOrBlank() || url.isNullOrBlank()) {
+                        result.error("INVALID_ARGS", "ps4Ip and url are required", null)
+                        return@setMethodCallHandler
+                    }
+                    @Suppress("UNCHECKED_CAST")
+                    val headers = (call.argument<Map<String, Any?>>("headers") ?: emptyMap())
+                        .mapNotNull { (k, v) -> v?.toString()?.let { k to it } }
+                        .toMap()
+
+                    val proxy = PkgProxyService.proxy
+                    if (proxy == null || !proxy.isRunning()) {
+                        result.error("SERVICE_NOT_RUNNING", "Proxy service is not running", null)
+                        return@setMethodCallHandler
+                    }
+
+                    Thread {
+                        val res = GoldHenInstaller.installViaBinLoader(
+                            context = applicationContext,
+                            proxy = proxy,
+                            ps4Ip = ps4Ip.trim(),
+                            upstreamUrl = url.trim(),
+                            headers = headers,
+                            onLog = { msg -> PkgProxyService.onProxyLog?.invoke(msg) },
+                        )
+                        mainHandler.post {
+                            result.success(
+                                mapOf(
+                                    "success" to res.success,
+                                    "title" to res.title,
+                                    "contentId" to res.contentId,
+                                    "packageSize" to res.packageSize,
+                                    "manifestUrl" to res.manifestUrl,
+                                    "proxyUrl" to res.proxyUrl,
+                                    "streamId" to res.streamId,
+                                    "error" to (res.error ?: ""),
+                                )
+                            )
+                        }
+                    }.start()
+                }
+
                 else -> result.notImplemented()
             }
         }
