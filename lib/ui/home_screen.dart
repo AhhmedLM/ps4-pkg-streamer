@@ -32,9 +32,11 @@ class _HomeScreenState extends State<HomeScreen> {
   Timer? _progressTimer;
 
   bool _useGoldHenBinLoader = true;
+  bool _batteryUnrestricted = true;
   bool _isScanning = false;
   bool _isInstalling = false;
   bool _isProbing = false;
+  bool _isRefreshing = false;
   bool _showAdvancedHeaders = false;
   List<String> _discoveredPs4s = [];
   LinkProbeResult? _probeResult;
@@ -70,8 +72,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
     try {
       final status = await _proxyBridge.getStatus();
+      final unrestricted = await _proxyBridge.isBatteryOptimizationIgnored();
       if (mounted) {
-        setState(() => _proxyStatus = status);
+        setState(() {
+          _proxyStatus = status;
+          _batteryUnrestricted = unrestricted;
+        });
       }
     } catch (e) {
       _addLog('تعذر جلب حالة الخادم: $e');
@@ -211,6 +217,45 @@ class _HomeScreenState extends State<HomeScreen> {
       _addLog('فشل فحص الرابط: $e');
     } finally {
       if (mounted) setState(() => _isProbing = false);
+    }
+  }
+
+  Future<void> _requestBatteryUnrestricted() async {
+    await _proxyBridge.requestIgnoreBatteryOptimizations();
+    await Future<void>.delayed(const Duration(seconds: 1));
+    final unrestricted = await _proxyBridge.isBatteryOptimizationIgnored();
+    if (mounted) {
+      setState(() => _batteryUnrestricted = unrestricted);
+    }
+  }
+
+  Future<void> _refreshForResume() async {
+    final pkgUrl = _pkgUrlController.text.trim();
+    if (pkgUrl.isEmpty ||
+        (!pkgUrl.startsWith('http://') && !pkgUrl.startsWith('https://'))) {
+      _showSnack('يرجى إدخال رابط التحميل الجديد أولاً');
+      return;
+    }
+
+    setState(() => _isRefreshing = true);
+    try {
+      if (!_proxyStatus.running) {
+        final status = await _proxyBridge.startService(port: 8888);
+        setState(() => _proxyStatus = status);
+      }
+      final res = await _proxyBridge.refreshUrlForResume(
+        url: pkgUrl,
+        headers: _buildCustomHeaders(),
+      );
+      _addLog(
+        '✅ تم تحديث الرابط للاستئناف (${res['contentId']}): اضغط "إعادة المحاولة" في إشعارات PS4 الآن.',
+      );
+      _showSnack('تم تحديث الرابط! اضغط "إعادة المحاولة" على الـ PS4 للاستئناف.');
+    } catch (e) {
+      _addLog('❌ فشل تحديث الرابط: $e');
+      _showSnack('فشل تحديث الرابط: $e');
+    } finally {
+      if (mounted) setState(() => _isRefreshing = false);
     }
   }
 
@@ -478,6 +523,38 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       ],
                     ),
+                    if (!_batteryUnrestricted) ...[
+                      const SizedBox(height: 12),
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Colors.amber.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.amberAccent),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.battery_alert,
+                              color: Colors.amberAccent,
+                              size: 20,
+                            ),
+                            const SizedBox(width: 8),
+                            const Expanded(
+                              child: Text(
+                                'النظام قد يوقف البث في الخلفية أثناء التحميل الطويل. استثنِ التطبيق من توفير البطارية.',
+                                style: TextStyle(fontSize: 12),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            TextButton(
+                              onPressed: _requestBatteryUnrestricted,
+                              child: const Text('تفعيل'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -715,43 +792,62 @@ class _HomeScreenState extends State<HomeScreen> {
                     const SizedBox(height: 14),
                     Row(
                       children: [
-                        OutlinedButton.icon(
-                          onPressed: _isProbing ? null : _probeLink,
-                          icon: _isProbing
-                              ? const SizedBox(
-                                  width: 16,
-                                  height: 16,
-                                  child: CircularProgressIndicator(strokeWidth: 2),
-                                )
-                              : const Icon(Icons.verified_outlined),
-                          label: const Text('فحص الرابط'),
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: _isProbing ? null : _probeLink,
+                            icon: _isProbing
+                                ? const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.verified_outlined, size: 18),
+                            label: const Text('فحص الرابط'),
+                          ),
                         ),
                         const SizedBox(width: 8),
                         Expanded(
-                          child: SizedBox(
-                            height: 48,
-                            child: FilledButton.icon(
-                              onPressed: _isInstalling ? null : _startInstall,
-                              icon: _isInstalling
-                                  ? const SizedBox(
-                                      width: 18,
-                                      height: 18,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : const Icon(Icons.download_for_offline),
-                              label: const Text(
-                                'بدء التثبيت المباشر على PS4',
-                                style: TextStyle(
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ),
+                          child: OutlinedButton.icon(
+                            onPressed: _isRefreshing ? null : _refreshForResume,
+                            icon: _isRefreshing
+                                ? const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.refresh, size: 18),
+                            label: const Text('تحديث للاستئناف'),
                           ),
                         ),
                       ],
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 48,
+                      child: FilledButton.icon(
+                        onPressed: _isInstalling ? null : _startInstall,
+                        icon: _isInstalling
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.download_for_offline),
+                        label: const Text(
+                          'بدء التثبيت المباشر على PS4',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
                     ),
                   ],
                 ),

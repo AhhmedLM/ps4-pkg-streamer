@@ -168,6 +168,96 @@ class MainActivity : FlutterActivity() {
                     }.start()
                 }
 
+                "isBatteryOptimizationIgnored" -> {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
+                        result.success(pm.isIgnoringBatteryOptimizations(packageName))
+                    } else {
+                        result.success(true)
+                    }
+                }
+
+                "requestIgnoreBatteryOptimizations" -> {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
+                        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                            val intent = Intent(
+                                android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+                            ).apply {
+                                data = android.net.Uri.parse("package:$packageName")
+                            }
+                            startActivity(intent)
+                        }
+                    }
+                    result.success(true)
+                }
+
+                "refreshUrlForResume" -> {
+                    val url = call.argument<String>("url")
+                    if (url.isNullOrBlank()) {
+                        result.error("INVALID_URL", "URL is required", null)
+                        return@setMethodCallHandler
+                    }
+                    @Suppress("UNCHECKED_CAST")
+                    val headers = (call.argument<Map<String, Any?>>("headers") ?: emptyMap())
+                        .mapNotNull { (k, v) -> v?.toString()?.let { k to it } }
+                        .toMap()
+
+                    val proxy = PkgProxyService.proxy
+                    if (proxy == null || !proxy.isRunning()) {
+                        result.error("SERVICE_NOT_RUNNING", "Proxy service is not running", null)
+                        return@setMethodCallHandler
+                    }
+
+                    Thread {
+                        try {
+                            val conn = proxy.openUpstreamConnection(
+                                urlStr = url.trim(),
+                                method = "GET",
+                                rangeHeader = "bytes=0-255",
+                                customHeaders = headers,
+                            )
+                            val buf = ByteArray(256)
+                            val read = conn.inputStream.use { it.read(buf) }
+                            conn.disconnect()
+                            if (read < 0x64 ||
+                                buf[0] != 0x7F.toByte() ||
+                                buf[1] != 0x43.toByte() ||
+                                buf[2] != 0x4E.toByte() ||
+                                buf[3] != 0x54.toByte()
+                            ) {
+                                mainHandler.post {
+                                    result.error("INVALID_PKG", "الرابط الجديد لا يشير إلى ملف PKG صالح", null)
+                                }
+                                return@Thread
+                            }
+                            val contentId = String(buf, 0x40, 36, Charsets.US_ASCII)
+                                .trim('\u0000', ' ')
+                                .ifBlank { "UP0000-CUSA00000_00-0000000000000000" }
+                            val entry = proxy.registerStream(
+                                url = url.trim(),
+                                fileName = null,
+                                headers = headers,
+                                preferredId = contentId,
+                            )
+                            val localIp = StreamingHttpProxy.getLocalIpAddress()
+                            mainHandler.post {
+                                result.success(
+                                    mapOf(
+                                        "id" to entry.id,
+                                        "proxyUrl" to "http://$localIp:${proxy.getPort()}/pkg/${entry.id}.pkg",
+                                        "contentId" to contentId,
+                                    )
+                                )
+                            }
+                        } catch (e: Exception) {
+                            mainHandler.post {
+                                result.error("REFRESH_FAILED", e.message ?: "فشل تحديث الرابط", null)
+                            }
+                        }
+                    }.start()
+                }
+
                 else -> result.notImplemented()
             }
         }

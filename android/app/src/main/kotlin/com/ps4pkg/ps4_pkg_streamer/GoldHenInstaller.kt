@@ -52,7 +52,13 @@ object GoldHenInstaller {
             onLog("تم التعرف على الحزمة: ${meta.contentId} (${String.format("%.1f", sizeMb)} MB • ${meta.bgftType})")
 
             // 2. Register stream + BGFT manifest JSON on our local StreamingHttpProxy
-            val entry = proxy.registerStream(upstreamUrl, meta.friendlyName, headers)
+            // Using contentId as deterministic ID so PS4 Resume works even after service restart or link refresh
+            val entry = proxy.registerStream(
+                url = upstreamUrl,
+                fileName = meta.friendlyName,
+                headers = headers,
+                preferredId = meta.contentId,
+            )
             val localIp = StreamingHttpProxy.getLocalIpAddress()
             val proxyUrl = "http://$localIp:${proxy.getPort()}/pkg/${entry.id}.pkg"
 

@@ -54,6 +54,7 @@ data class ProbeResult(
 class StreamingHttpProxy(
     private val port: Int = 8888,
     private val onLog: ((String) -> Unit)? = null,
+    private val onStateChanged: ((Map<String, StreamEntry>, Map<String, String>) -> Unit)? = null,
 ) {
 
     private val running = AtomicBoolean(false)
@@ -78,6 +79,11 @@ class StreamingHttpProxy(
 
     fun getPort(): Int = serverSocket?.localPort ?: port
 
+    fun restoreState(savedEntries: Map<String, StreamEntry>, savedManifests: Map<String, String>) {
+        entries.putAll(savedEntries)
+        jsonManifests.putAll(savedManifests)
+    }
+
     fun start(): Boolean {
         if (running.getAndSet(true)) return true
         return try {
@@ -91,7 +97,7 @@ class StreamingHttpProxy(
                     try {
                         val client = socket.accept()
                         client.tcpNoDelay = true
-                        client.soTimeout = 30_000
+                        client.soTimeout = 60_000
                         workerPool?.execute { handleClient(client) }
                     } catch (_: IOException) {
                         if (!running.get()) break
@@ -119,8 +125,14 @@ class StreamingHttpProxy(
         activeConnections.set(0)
     }
 
-    fun registerStream(url: String, fileName: String?, headers: Map<String, String>): StreamEntry {
-        val id = UUID.randomUUID().toString().replace("-", "").take(12)
+    fun registerStream(
+        url: String,
+        fileName: String?,
+        headers: Map<String, String>,
+        preferredId: String? = null,
+    ): StreamEntry {
+        val id = preferredId?.replace(Regex("[^a-zA-Z0-9_-]"), "_")?.takeIf { it.isNotBlank() }
+            ?: UUID.randomUUID().toString().replace("-", "").take(12)
         val sanitizedName = sanitizeFileName(fileName, url)
         val entry = StreamEntry(
             id = id,
@@ -129,17 +141,20 @@ class StreamingHttpProxy(
             headers = headers,
         )
         entries[id] = entry
+        onStateChanged?.invoke(entries.toMap(), jsonManifests.toMap())
         return entry
     }
 
     fun registerJsonManifest(id: String, jsonBody: String): String {
         jsonManifests[id] = jsonBody
+        onStateChanged?.invoke(entries.toMap(), jsonManifests.toMap())
         return "http://${getLocalIpAddress()}:${getPort()}/json/$id.json"
     }
 
     fun unregisterStream(id: String) {
         entries.remove(id)
         jsonManifests.remove(id)
+        onStateChanged?.invoke(entries.toMap(), jsonManifests.toMap())
     }
 
     fun resetStats() {
@@ -495,8 +510,8 @@ class StreamingHttpProxy(
             val conn = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = method
                 instanceFollowRedirects = false
-                connectTimeout = 15_000
-                readTimeout = 30_000
+                connectTimeout = 20_000
+                readTimeout = 60_000
                 setRequestProperty(
                     "User-Agent",
                     customHeaders["User-Agent"]

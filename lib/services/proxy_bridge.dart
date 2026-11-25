@@ -179,6 +179,31 @@ class ProxyBridge {
     await _methodChannel.invokeMethod('resetStats');
   }
 
+  Future<bool> isBatteryOptimizationIgnored() async {
+    final res = await _methodChannel.invokeMethod<bool>(
+      'isBatteryOptimizationIgnored',
+    );
+    return res ?? true;
+  }
+
+  Future<void> requestIgnoreBatteryOptimizations() async {
+    await _methodChannel.invokeMethod('requestIgnoreBatteryOptimizations');
+  }
+
+  Future<Map<String, dynamic>> refreshUrlForResume({
+    required String url,
+    Map<String, String> headers = const {},
+  }) async {
+    final res = await _methodChannel.invokeMethod<Map<dynamic, dynamic>>(
+      'refreshUrlForResume',
+      {
+        'url': url,
+        'headers': headers,
+      },
+    );
+    return Map<String, dynamic>.from(res ?? {});
+  }
+
   Future<GoldHenInstallResult> installViaGoldHen({
     required String ps4Ip,
     required String url,

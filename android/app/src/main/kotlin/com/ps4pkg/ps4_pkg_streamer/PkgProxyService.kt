@@ -68,9 +68,14 @@ class PkgProxyService : Service() {
         acquireLocks()
 
         if (proxy == null || proxy?.isRunning() != true) {
-            val newProxy = StreamingHttpProxy(port) { msg ->
-                onProxyLog?.invoke(msg)
-            }
+            val newProxy = StreamingHttpProxy(
+                port = port,
+                onLog = { msg -> onProxyLog?.invoke(msg) },
+                onStateChanged = { entriesMap, manifestsMap ->
+                    saveProxyState(entriesMap, manifestsMap)
+                },
+            )
+            restoreProxyState(newProxy)
             if (newProxy.start()) {
                 proxy = newProxy
             }
@@ -82,6 +87,85 @@ class PkgProxyService : Service() {
         }
 
         return START_STICKY
+    }
+
+    private fun saveProxyState(
+        entriesMap: Map<String, StreamEntry>,
+        manifestsMap: Map<String, String>,
+    ) {
+        try {
+            val prefs = getSharedPreferences("ps4_pkg_proxy_state", Context.MODE_PRIVATE)
+            val entriesJson = org.json.JSONObject()
+            for ((id, entry) in entriesMap) {
+                val obj = org.json.JSONObject()
+                obj.put("id", entry.id)
+                obj.put("url", entry.url)
+                obj.put("fileName", entry.fileName)
+                val hdrs = org.json.JSONObject()
+                for ((k, v) in entry.headers) {
+                    hdrs.put(k, v)
+                }
+                obj.put("headers", hdrs)
+                entriesJson.put(id, obj)
+            }
+            val manifestsJson = org.json.JSONObject()
+            for ((id, json) in manifestsMap) {
+                manifestsJson.put(id, json)
+            }
+            prefs.edit()
+                .putString("entries", entriesJson.toString())
+                .putString("manifests", manifestsJson.toString())
+                .apply()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun restoreProxyState(target: StreamingHttpProxy) {
+        try {
+            val prefs = getSharedPreferences("ps4_pkg_proxy_state", Context.MODE_PRIVATE)
+            val entriesStr = prefs.getString("entries", null)
+            val manifestsStr = prefs.getString("manifests", null)
+
+            val loadedEntries = mutableMapOf<String, StreamEntry>()
+            if (!entriesStr.isNullOrBlank()) {
+                val entriesJson = org.json.JSONObject(entriesStr)
+                val keys = entriesJson.keys()
+                while (keys.hasNext()) {
+                    val id = keys.next()
+                    val obj = entriesJson.getJSONObject(id)
+                    val hdrsObj = obj.optJSONObject("headers")
+                    val hdrs = mutableMapOf<String, String>()
+                    if (hdrsObj != null) {
+                        val hKeys = hdrsObj.keys()
+                        while (hKeys.hasNext()) {
+                            val hk = hKeys.next()
+                            hdrs[hk] = hdrsObj.getString(hk)
+                        }
+                    }
+                    loadedEntries[id] = StreamEntry(
+                        id = obj.getString("id"),
+                        url = obj.getString("url"),
+                        fileName = obj.getString("fileName"),
+                        headers = hdrs,
+                    )
+                }
+            }
+
+            val loadedManifests = mutableMapOf<String, String>()
+            if (!manifestsStr.isNullOrBlank()) {
+                val manifestsJson = org.json.JSONObject(manifestsStr)
+                val keys = manifestsJson.keys()
+                while (keys.hasNext()) {
+                    val id = keys.next()
+                    loadedManifests[id] = manifestsJson.getString(id)
+                }
+            }
+
+            if (loadedEntries.isNotEmpty() || loadedManifests.isNotEmpty()) {
+                target.restoreState(loadedEntries, loadedManifests)
+            }
+        } catch (_: Exception) {
+        }
     }
 
     override fun onDestroy() {
